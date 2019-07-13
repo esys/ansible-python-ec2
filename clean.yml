@@ -1,0 +1,46 @@
+---
+- hosts: local
+  connection: local
+  vars:
+    filters:
+      "tag:app": hello
+      "tag:type": web
+  vars_files:
+    - aws_keys.yml
+    - vars.yml
+  tasks:
+    - name: "Gather EC2 facts"
+      ec2_instance_facts:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        filters: "{{ filters }}"
+      register: ec2
+
+    - name: "Terminate EC2"
+      ec2:
+        instance_ids: '{{ item.instance_id }}'
+        state: absent
+        region: "{{ region }}"
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+      loop: "{{ ec2.instances }}"
+
+    - name: "Delete EC2 security group"
+      ec2_group:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        # name: "{{ security_group }}"
+        group_id: "{{ item.group_id }}"
+        state: absent
+      loop: "{{ ec2.instances[0].security_groups }}"
+
+    - name: "Delete ELB"
+      ec2_elb_lb:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        name: "{{ load_balancer }}"
+        state: absent
+    

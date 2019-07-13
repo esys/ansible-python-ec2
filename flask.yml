@@ -1,0 +1,161 @@
+---
+- hosts: local
+  connection: local
+  gather_facts: False
+  vars_files:
+    - vars.yml
+    - aws_keys.yml
+  tasks:
+    - name: Create security group for EC2
+      ec2_group:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        name: "{{ security_group }}"
+        description: Webservers security group
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+      register: sg
+
+    - name: Create the ELB listening on port 80
+      ec2_elb_lb:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        name: "{{ load_balancer }}"
+        state: present
+        region: "{{ region }}"
+        zones:
+          - "{{ region }}a"
+        listeners:
+          - protocol: http
+            load_balancer_port: 80
+            instance_port: 80
+        health_check:
+          ping_protocol: http
+          ping_port: 80
+          ping_path: "/"
+          response_timeout: 5
+          interval: 10
+          unhealthy_threshold: 10
+          healthy_threshold: 2
+        tags: "{{ infra_tags }}"
+      register: elb
+
+    - name: Launch new EC2 instances
+      ec2:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        group_id: 
+          - "{{ sg.group_id }}"
+          - "{{ elb.elb.security_group_ids | first }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        wait: true 
+        region: "{{ region }}"
+        keypair: "{{ keypair }}"
+        count: "{{ count }}"
+        instance_tags: "{{ infra_tags }}"
+      register: ec2
+    - name: Add EC2 instances to inventory
+      add_host:
+        name: "{{ item.public_ip }}"
+        groups: remote
+      loop: "{{ ec2.instances }}"
+    - name: Wait for SSH to come up
+      wait_for_connection:
+        delay: 60
+        timeout: 120
+      loop: "{{ ec2.instances }}"
+
+- hosts: remote
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  gather_facts: yes
+  vars_files:
+    - vars.yml
+  tasks:
+  - name: Add Docker GPG key
+    apt_key: url=https://download.docker.com/linux/ubuntu/gpg
+  - name: Install docker prerequisites
+    apt:
+      name: ['apt-transport-https','ca-certificates','curl','gnupg2','software-properties-common']
+      state: present
+      update_cache: yes
+  - name: Add Docker APT repository
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/{{ansible_distribution|lower}} {{ansible_distribution_release}} stable
+  - name: Install Docker packages
+    apt:
+      name: ['docker-ce','docker-ce-cli']
+      state: present
+  - name: Install Docker-compose 
+    shell: curl -L "https://github.com/docker/compose/releases/download/1.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    args:
+      warn: false
+
+  - name: Install packages
+    apt: name={{item}} state=present
+    loop:
+      - python-setuptools
+      - python3-pip
+      - nginx
+  - name: Pip setup for ansible
+    pip:
+      name: 
+       - docker
+       - docker-compose
+
+  - name: Copy app files
+    copy:
+      src: python/
+      dest: /home/{{ user }}/{{ app_name }}
+  - name: Run the container
+    docker_compose:
+      project_src: /home/{{ user }}/{{ app_name }}
+      state: present
+
+  - name: Create nginx config
+    template:
+      src: nginx.j2
+      dest: /etc/nginx/sites-available/{{ app_name }}
+  - name: Remove default nginx site config
+    file: path=/etc/nginx/sites-enabled/default state=absent
+  - name: Enable nginx site
+    file:
+        src: /etc/nginx/sites-available/{{ app_name }}
+        dest: /etc/nginx/sites-enabled/default
+        state: link
+        force: yes
+  - name: Restart nginx
+    systemd: name=nginx state=restarted enabled=yes
+ 
+- hosts: local
+  connection: local
+  gather_facts: False
+  vars_files:
+    - vars.yml  
+    - aws_keys.yml
+  tasks:
+    - name: Attach EC2 instance to ELB
+      ec2_elb:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        state: present
+        ec2_elbs: "{{ load_balancer }}"
+        region: "{{ region }}"
+        instance_id: "{{ item.id }}"
+      loop: "{{ ec2.instances }}"
+
+    - name: Check that application is reachable through ELB
+      uri:
+        url: "http://{{ elb.elb.dns_name }}"
+
+    - debug:
+        msg: "Website reachable on http://{{ elb.elb.dns_name }}"

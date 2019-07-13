@@ -1,0 +1,12 @@
+instance_type: t2.small
+count: 1 # number of EC2 instances
+security_group: webserver
+load_balancer: hello-lb
+image: ami-c1cf79bc # Ubuntu 16.04
+keypair: esys # EC2 AWS key pair name
+region: eu-west-3
+infra_tags:
+  app: hello
+  type: web
+app_name: hello
+user: app

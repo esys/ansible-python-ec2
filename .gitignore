@@ -1,0 +1,3 @@
+.vscode
+aws_keys.yml
+*.pem
